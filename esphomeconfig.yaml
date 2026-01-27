@@ -1,0 +1,220 @@
+esphome:
+  name: cc1101-transceiver
+  friendly_name: CC1101 RF Transceiver
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi: 
+  ssid:  !secret wifi_ssid
+  password: !secret wifi_password
+  
+logger:
+
+api:
+  encryption:
+    key: ""
+
+ota:
+  - platform: esphome
+    password: ""
+
+web_server:
+  port: 80
+
+# Globals to store learned signals
+globals:
+  - id: learned_code
+    type: std::vector<int32_t>
+    restore_value: no
+  - id: learning_mode
+    type: bool
+    initial_value: 'false'
+  - id: signal_learned
+    type: bool
+    initial_value: 'false'
+
+# SPI Bus
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+# CC1101 - Dual Pin Mode
+cc1101:
+  id: cc1101_module
+  cs_pin: GPIO5
+  frequency: 433.92MHz
+  output_power: 10
+  modulation_type: ASK/OOK
+  symbol_rate: 5000
+  filter_bandwidth: 200kHz
+
+# Remote Receiver - connected to GDO2
+remote_receiver:
+  id: rf_receiver
+  pin: GPIO2
+  tolerance: 50%
+  filter: 200us
+  dump:
+    - raw
+  idle: 10ms
+  on_raw:
+    then:
+      - lambda: |-
+          // Log as single copyable line for YAML
+          std::string code_str = "";
+          for (int i = 0; i < x.size(); i++) {
+            if (i > 0) code_str += ", ";
+            code_str += std::to_string(x[i]);
+          }
+          ESP_LOGI("raw_code", "Pulses: %d", x.size());
+          ESP_LOGI("raw_code", "Copy this line:");
+          ESP_LOGI("raw_code", "[%s]", code_str.c_str());
+          
+          // Learning mode logic
+          if (id(learning_mode)) {
+            id(learned_code).clear();
+            for (int32_t val : x) {
+              id(learned_code).push_back(val);
+            }
+            id(signal_learned) = true;
+            id(learning_mode) = false;
+            
+            std::string preview = "";
+            int count = 0;
+            for (int32_t val : id(learned_code)) {
+              if (count > 0) preview += ", ";
+              preview += std::to_string(val);
+              count++;
+              if (count >= 20) {
+                preview += "... (" + std::to_string(id(learned_code).size()) + " total)";
+                break;
+              }
+            }
+            
+            id(last_signal).publish_state(preview.c_str());
+            id(learn_status).publish_state("Signal learned! " + std::to_string(id(learned_code).size()) + " pulses. Select slot to save.");
+          }
+
+# Remote Transmitter - connected to GDO0
+remote_transmitter:
+  id: rf_transmitter
+  pin: GPIO4
+  carrier_duty_percent: 100%
+  on_transmit:
+    then:
+      - cc1101.begin_tx: cc1101_module
+  on_complete:
+    then:
+      - cc1101.begin_rx: cc1101_module
+
+switch:
+  - platform: template
+    name: "Learning Mode"
+    id: learning_mode_switch
+    icon: "mdi:school"
+    lambda: 'return id(learning_mode);'
+    turn_on_action:
+      - lambda: |-
+          id(learning_mode) = true;
+          id(learn_status).publish_state("Waiting for signal... Press remote now!");
+      - logger.log: "Learning mode ON - press your remote"
+    turn_off_action:
+      - lambda: |-
+          id(learning_mode) = false;
+          id(learn_status).publish_state("Learning cancelled");
+      - logger.log: "Learning mode OFF"
+
+button:
+  - platform: restart
+    name: "Restart"
+
+  - platform: template
+    name: "Learn Signal"
+    icon: "mdi:record-rec"
+    on_press:
+      - switch.turn_on: learning_mode_switch
+
+  - platform: template
+    name: "Replay Learned Signal"
+    icon: "mdi:replay"
+    on_press:
+      - lambda: |-
+          if (!id(signal_learned) || id(learned_code).empty()) {
+            ESP_LOGW("replay", "No signal learned yet!");
+            id(learn_status).publish_state("No signal to replay - learn one first!");
+            return;
+          }
+          ESP_LOGI("replay", "Replaying %d pulses...", id(learned_code).size());
+          id(learn_status).publish_state("Transmitting...");
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 0Hz
+          code: !lambda 'return id(learned_code);'
+      - lambda: |-
+          id(learn_status).publish_state("Signal transmitted!");
+          ESP_LOGI("replay", "Replay complete");
+
+  - platform: template
+    name: "Replay x3"
+    icon: "mdi:replay"
+    on_press:
+      - lambda: |-
+          if (!id(signal_learned) || id(learned_code).empty()) {
+            ESP_LOGW("replay", "No signal learned yet!");
+            return;
+          }
+      - repeat:
+          count: 3
+          then:
+            - remote_transmitter.transmit_raw:
+                carrier_frequency: 0Hz
+                code: !lambda 'return id(learned_code);'
+            - delay: 50ms
+
+  - platform: template
+    name: "Clear Learned Signal"
+    icon: "mdi:delete"
+    on_press:
+      - lambda: |-
+          id(learned_code).clear();
+          id(signal_learned) = false;
+          id(last_signal).publish_state("(empty)");
+          id(learn_status).publish_state("Signal cleared");
+          ESP_LOGI("learn", "Learned signal cleared");
+
+  - platform: template
+    name: "TX Test"
+    icon: "mdi:access-point"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 0Hz
+          code: [500, -500, 500, -500, 500, -500, 500, -500, 500, -500]
+
+text_sensor:
+  - platform: template
+    name: "Last Received Signal"
+    id: last_signal
+    icon: "mdi:signal"
+
+  - platform: template
+    name: "Learn Status"
+    id: learn_status
+    icon: "mdi:information"
+
+sensor:
+  - platform: template
+    name: "Learned Signal Length"
+    id: signal_length
+    icon: "mdi:counter"
+    unit_of_measurement: "pulses"
+    lambda: 'return id(learned_code).size();'
+    update_interval: 5s
+
+binary_sensor:
+  - platform: template
+    name: "Signal Learned"
+    icon: "mdi:check-circle"
+    lambda: 'return id(signal_learned);'
