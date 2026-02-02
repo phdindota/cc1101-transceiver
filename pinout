@@ -1,0 +1,9 @@
+    ┌───────────────┐
+    │   CC1101 PCB  │
+    │               │
+  1 │ GDO0    VCC   │ 8
+  2 │ GDO2    GND   │ 7
+  3 │ CSN     MOSI  │ 6
+  4 │ SCK     MISO  │ 5
+    │               │
+    └───┤ ANT ├─────┘
