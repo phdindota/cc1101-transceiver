@@ -94,48 +94,6 @@ Pin numbering may vary between modules. Always verify with your module's datashe
 - ESP32 board with USB cable
 - CC1101 module wired to ESP32
 
-### Setup
-
-1. **Clone this repository:**
-
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/esphome-cc1101-transceiver.git
-   cd esphome-cc1101-transceiver
-   ```
-
-2. **Create a `secrets.yaml`** in the same directory:
-
-   ```yaml
-   wifi_ssid: "YourWiFiName"
-   wifi_password: "YourWiFiPassword"
-   ```
-
-3. **Update `cc1101-transceiver.yaml`** — add your API encryption key and OTA password:
-
-   ```yaml
-   api:
-     encryption:
-       key: "your-generated-key-here"
-
-   ota:
-     - platform: esphome
-       password: "your-ota-password"
-   ```
-
-   Generate an API key with:
-   ```bash
-   python3 -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
-   ```
-
-4. **Flash the ESP32:**
-
-   ```bash
-   esphome run cc1101-transceiver.yaml
-   ```
-
-5. **Add to Home Assistant:** The device should be auto-discovered under **Settings → Devices & Services → ESPHome**.
-
----
 
 ## Usage
 
