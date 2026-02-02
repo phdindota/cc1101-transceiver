@@ -68,19 +68,7 @@ Uses separate pins for TX and RX — no mode switching needed.
 
 > **Note:** If GPIO2 causes issues on your board (some have an onboard LED), use GPIO15, GPIO16, or GPIO17 instead.
 
-### CC1101 Module Pinout
-
-```
-    ┌───────────────┐
-    │   CC1101 PCB  │
-    │               │
-  1 │ GDO0    VCC   │ 8
-  2 │ GDO2    GND   │ 7
-  3 │ CSN     MOSI  │ 6
-  4 │ SCK     MISO  │ 5
-    │               │
-    └───┤ ANT ├─────┘
-```
+---
 
 Pin numbering may vary between modules. Always verify with your module's datasheet.
 
