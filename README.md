@@ -297,22 +297,22 @@ Adjust in the `cc1101:` section of the YAML:
 - [ESPHome Remote Transmitter](https://esphome.io/components/remote_transmitter/)
 - [CC1101 Datasheet (TI)](https://www.ti.com/lit/ds/symlink/cc1101.pdf)
 
+
+
+
+<img width="680" height="376" alt="pinout" src="https://github.com/user-attachments/assets/4f130420-5a04-4961-bda6-74fa3b30203e" />
+
+<img width="743" height="426" alt="pinout cc1101" src="https://github.com/user-attachments/assets/00d9a761-d469-4747-8a54-86be12df6119" />
+
+<img width="741" height="384" alt="wiring color" src="https://github.com/user-attachments/assets/ac4c19e4-b8da-4b94-95b1-56d990a1aee8" />
+
+
+
 ---
 
 ## License
 
 MIT License — free to use, modify, and share.
-
-
-
-
-
-
-
-
-
-
-
 
 
 
