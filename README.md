@@ -299,17 +299,6 @@ Adjust in the `cc1101:` section of the YAML:
 | RF light switches | |
 | Fixed-code gate remotes | |
 
----
-
-## Project Structure
-
-```
-esphome-cc1101-transceiver/
-├── cc1101-transceiver.yaml   # Main ESPHome configuration
-├── secrets.yaml              # WiFi credentials (do not commit)
-├── wiring-diagram.svg        # Wiring diagram
-└── README.md                 # This file
-```
 
 ---
 
