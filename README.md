@@ -23,7 +23,7 @@ Learn and replay 433 MHz RF signals from remotes, blinds, outlets, and more — 
 | Component | Description |
 |-----------|-------------|
 | ESP32-WROOM DevKit | Any ESP32 development board |
-| CC1101 Module | 433 MHz version (common green PCB modules) |
+| CC1101 Module | 433 MHz version (common green or blue PCB modules) |
 | Jumper Wires | 8 female-to-female dupont wires |
 | Antenna | 433 MHz antenna (17.3 cm wire or SMA antenna) |
 
