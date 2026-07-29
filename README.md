@@ -11,7 +11,7 @@ Learn and replay 433 MHz RF signals from remotes, blinds, outlets, and more — 
 
 - **Learn RF signals** — Capture signals from any 433 MHz remote
 - **Replay signals** — Retransmit learned signals on demand (single or x3)
-- **Single-line log output** — Captured codes logged as copyable arrays
+- **Chunked log output** — Captured codes logged in copyable chunks that fit the log buffer
 - **Dual pin wiring** — Simultaneous TX/RX without mode switching
 - **Home Assistant integration** — Full control via buttons, switches, and sensors
 - **Web interface** — Built-in web server on port 80 for standalone use
@@ -105,15 +105,25 @@ Pin numbering may vary between modules. Always verify with your module's datashe
 
 ### Copying Raw Codes from Logs
 
-Every received signal is logged as a single copyable line in the ESPHome console:
+Every received signal is logged in **chunks** so each line fits within the ESPHome log buffer (~256 chars). Long codes are split across multiple `part` lines that you reassemble into a single array:
 
 ```
-[I][raw_code:xxx]: Pulses: 122
-[I][raw_code:xxx]: Copy this line:
-[I][raw_code:xxx]: [592, -635, 266, -295, 617, -615, 268, -309, ...]
+[I][raw_code:xxx]: Pulses: 182
+[I][raw_code:xxx]: Copy each part line in order, then concatenate with ', ':
+[I][raw_code:xxx]: part 0: 592, -635, 266, -295, 617, -615, 268, -309, ...   (40 values)
+[I][raw_code:xxx]: part 1: 590, -640, 264, -301, 615, -612, 270, -305, ...   (40 values)
+[I][raw_code:xxx]: part 2: 588, -638, 269, -298, 614, -618, 266, -302, ...  (remaining values)
+```
+
+To rebuild the full code, concatenate the parts in order, separating each with `, `:
+
+```
+code: [part0 values, part1 values, part2 values]
 ```
 
 You can paste this array directly into the YAML config as a permanent button.
+
+> **Why chunks?** ESPHome truncates log lines that exceed its buffer. Without chunking, longer codes are cut off mid-sequence and cannot be reconstructed.
 
 ---
 
