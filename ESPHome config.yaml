@@ -64,16 +64,20 @@ remote_receiver:
   on_raw:
     then:
       - lambda: |-
-          // Log as single copyable line for YAML
-          std::string code_str = "";
-          for (int i = 0; i < x.size(); i++) {
-            if (i > 0) code_str += ", ";
-            code_str += std::to_string(x[i]);
-          }
+          // Log in chunks so each line fits the ESPHome log buffer (~256 chars).
+          // Reassemble: part0 + ", " + part1 + ", " + ... -> code: [...]
           ESP_LOGI("raw_code", "Pulses: %d", x.size());
-          ESP_LOGI("raw_code", "Copy this line:");
-          ESP_LOGI("raw_code", "[%s]", code_str.c_str());
-          
+          ESP_LOGI("raw_code", "Copy each part line in order, then concatenate with ', ':");
+          const int chunk = 40;
+          for (int i = 0; i < (int)x.size(); i += chunk) {
+            std::string s;
+            for (int j = i; j < (int)x.size() && j < i + chunk; j++) {
+              if (j > i) s += ", ";
+              s += std::to_string(x[j]);
+            }
+            ESP_LOGI("raw_code", "part %d: %s", i / chunk, s.c_str());
+          }
+
           // Learning mode logic
           if (id(learning_mode)) {
             id(learned_code).clear();
