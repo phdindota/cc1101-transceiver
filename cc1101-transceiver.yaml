@@ -1,0 +1,544 @@
+# CC1101 dual-band RF transceiver for ESPHome
+#
+#   433.92 MHz and 315 MHz from a single CC1101, switching band per transmission.
+#
+# Every button sends on its own band through the rf_send script; between
+# transmissions the receiver returns to the band chosen in "RF Receive Band"
+# (433.92 MHz, 315 MHz, or "Scan both", which alternates between them).
+#
+# The RF codes below are EXAMPLES ONLY - they will not control any real device.
+# Capture your own: press "Learn Signal", press your remote, then copy the
+# "code:" line the log prints into a button. See the README.
+#
+# Built against ESPHome 2026.6 and checked against 2026.9. The native CC1101
+# driver retunes live from 2026.1 on.
+#
+# All *_hz values are in Hz, because CC1101Component::set_frequency() takes Hz.
+# Passing 315.0 would mean 315 Hz and the PLL never locks ("PLL lock failed").
+
+substitutions:
+  mhz_433: "433.92"
+  mhz_315: "315.0"
+  tx_power_dbm: "10"
+  min_pulses: "20"          # bursts shorter than this are treated as noise
+
+esphome:
+  name: cc1101-transceiver
+  friendly_name: CC1101 RF Transceiver
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Fallback hotspot if the WiFi network is unreachable
+  ap:
+    ssid: "CC1101 Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+# Using a LAN8720 Ethernet board instead of WiFi? Delete the two blocks above
+# and uncomment this one (pins are for the common LAN8720 + ESP32 boards):
+#
+# ethernet:
+#   type: LAN8720
+#   mdc_pin: GPIO23
+#   mdio_pin: GPIO18
+#   clk:
+#     pin: GPIO17
+#     mode: CLK_OUT
+#   phy_addr: 0
+#   power_pin:
+#     number: GPIO12
+#     ignore_strapping_warning: true
+#
+# Note: those Ethernet boards use GPIO23/18/17 for the PHY, so move the SPI
+# bus below to free pins (this repo's author uses GPIO13/14/15 for SPI).
+
+# Enable logging
+logger:
+  level: debug
+  tx_buffer_size: 4096      # fits a 384-timing code on one log line
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+web_server:
+  port: 80
+
+globals:
+  - id: listen_freq_hz      # band the receiver sits on between transmissions
+    type: float
+    initial_value: '${mhz_433} * 1e6f'
+  - id: tx_freq_hz          # band of the burst being transmitted (set by rf_send)
+    type: float
+    initial_value: '${mhz_433} * 1e6f'
+  - id: scan_mode
+    type: bool
+    initial_value: 'false'
+  - id: rf_busy             # true while a burst is on air: no retuning
+    type: bool
+    initial_value: 'false'
+  - id: last_frame_ms       # time of the last real burst (pauses scanning)
+    type: uint32_t
+    initial_value: '0'
+  - id: learning_mode
+    type: bool
+    initial_value: 'false'
+  - id: learn_first_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: capture_code        # std::vector<int> to match rf_send's int[] parameter
+    type: std::vector<int>
+  - id: capture_freq_hz
+    type: float
+    initial_value: '0'
+  - id: learned_code
+    type: std::vector<int>
+  - id: learned_freq_hz
+    type: float
+    initial_value: '0'
+  - id: signal_learned
+    type: bool
+    initial_value: 'false'
+  - id: fan_last_sent     # what the fan was last told: 0=off, 1..3=speed
+    type: int
+    initial_value: '0'
+  - id: fan_pending       # speed the current on_state pass still has to send
+    type: int
+    initial_value: '-1'
+
+# SPI Bus
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+# CC1101 - Dual Pin Mode
+cc1101:
+  id: cc1101_module
+  cs_pin: GPIO5
+  frequency: ${mhz_433}MHz    # boot band; "RF Receive Band" takes over
+  output_power: ${tx_power_dbm}
+  modulation_type: ASK/OOK
+  symbol_rate: 5000
+  filter_bandwidth: 200kHz
+
+# Remote Receiver - connected to GDO2
+remote_receiver:
+  id: rf_receiver
+  pin: GPIO2
+  tolerance: 50%
+  filter: 200us
+  idle: 10ms
+  # dump: [raw]             # uncomment to also log every burst, noise included
+  on_raw:
+    then:
+      - lambda: |-
+          // Drop the trailing idle gap so the code ends on a pulse
+          size_t len = x.size();
+          if (len > 0 && x[len - 1] < 0) len--;
+          if (len < ${min_pulses}) return;            // noise
+          id(last_frame_ms) = millis();                // scan mode holds this band
+          const float mhz = id(listen_freq_hz) / 1e6f;
+
+          std::string code;
+          code.reserve(len * 7);
+          for (size_t n = 0; n < len; n++) {
+            if (n > 0) code += ", ";
+            code += std::to_string(x[n]);
+          }
+          ESP_LOGI("raw_code", "%u pulses @ %.2f MHz. For a button:", (unsigned) len, mhz);
+          ESP_LOGI("raw_code", "freq_mhz: %.2f", mhz);
+          ESP_LOGI("raw_code", "code: [%s]", code.c_str());
+
+          char info[40];
+          snprintf(info, sizeof(info), "%u pulses @ %.2f MHz", (unsigned) len, mhz);
+          id(last_signal).publish_state(info);
+
+          // Learning keeps the longest burst seen in 1.5 s: the first burst
+          // of a press is often clipped while the receiver gain settles.
+          if (id(learning_mode) && len > id(capture_code).size()) {
+            if (id(learn_first_ms) == 0) id(learn_first_ms) = millis();
+            id(capture_code).assign(x.begin(), x.begin() + len);
+            id(capture_freq_hz) = id(listen_freq_hz);
+          }
+
+# Remote Transmitter - connected to GDO0
+remote_transmitter:
+  id: rf_transmitter
+  pin: GPIO4
+  carrier_duty_percent: 100%
+  non_blocking: true        # the ESP32 default; set so the retune logic is explicit
+  on_transmit:
+    then:
+      - lambda: |-
+          id(rf_busy) = true;
+          ESP_LOGI("rf", "TX on %.2f MHz", id(tx_freq_hz) / 1e6f);
+          // Store the burst's frequency, then re-initialise the radio from
+          // scratch so TX starts exactly as after a boot on that band: fresh
+          // PLL/VCO calibration and the band's PA table written while idle.
+          // A live retune leaves the PA table written during RX and the
+          // calibration carried over from the other band.
+          id(cc1101_module).set_frequency(id(tx_freq_hz));
+      - cc1101.reset: cc1101_module
+      - cc1101.begin_tx: cc1101_module
+  on_complete:
+    then:
+      - lambda: 'id(cc1101_module).set_frequency(id(listen_freq_hz));'
+      - cc1101.begin_rx: cc1101_module
+      - lambda: 'id(rf_busy) = false;'
+
+script:
+  # Sends a raw code on any band. The retune happens in on_transmit, and a new
+  # burst waits for the previous one to finish, so two buttons pressed together
+  # never go out on each other's frequency.
+  #   freq_mhz: band in MHz (use ${mhz_433} or ${mhz_315})
+  #   times:    how many times the code is sent
+  #   wait_ms:  gap between repeats (the fan needs 10)
+  - id: rf_send
+    mode: queued
+    max_runs: 10
+    parameters:
+      freq_mhz: float
+      times: int
+      wait_ms: int
+      code: int[]
+    then:
+      - lambda: 'id(tx_freq_hz) = freq_mhz * 1e6f;'
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          # int[] arrives as std::vector<int>; on ESP32 int32_t is long, so convert
+          code: !lambda 'return std::vector<int32_t>(code.begin(), code.end());'
+          repeat:
+            times: !lambda 'return times;'
+            wait_time: !lambda 'return wait_ms * 1000;'   # microseconds
+
+select:
+  - platform: template
+    name: "RF Receive Band"
+    id: rf_receive_band
+    icon: "mdi:radio-tower"
+    options:
+      - "433.92 MHz"
+      - "315 MHz"
+      - "Scan both"
+    initial_option: "433.92 MHz"
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            id(scan_mode) = (i == 2);
+            if (i == 1) id(listen_freq_hz) = ${mhz_315} * 1e6f;
+            else id(listen_freq_hz) = ${mhz_433} * 1e6f;   // scanning starts here
+            if (!id(rf_busy)) id(cc1101_module).set_frequency(id(listen_freq_hz));
+            ESP_LOGI("rf", "Receive band: %s",
+                     i == 2 ? "scanning both" : (i == 1 ? "${mhz_315} MHz" : "${mhz_433} MHz"));
+
+interval:
+  - interval: 250ms
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+
+          // Finish learning 1.5 s after the first real burst
+          if (id(learning_mode) && id(learn_first_ms) != 0 && now - id(learn_first_ms) >= 1500) {
+            id(learned_code) = id(capture_code);
+            id(learned_freq_hz) = id(capture_freq_hz);
+            id(signal_learned) = true;
+            id(learning_mode) = false;
+            id(learn_first_ms) = 0;
+            char info[40];
+            snprintf(info, sizeof(info), "%u pulses @ %.2f MHz",
+                     (unsigned) id(learned_code).size(), id(learned_freq_hz) / 1e6f);
+            id(learned_info).publish_state(info);
+            id(learn_status).publish_state(std::string("Signal learned! ") + info);
+            ESP_LOGI("learn", "Learned %s", info);
+          }
+
+          // Scan mode: alternate bands, but hold while a remote is sending
+          if (!id(scan_mode) || id(rf_busy) || now - id(last_frame_ms) < 2000) return;
+          const bool on_315 = id(listen_freq_hz) < (${mhz_433} + ${mhz_315}) * 0.5e6f;
+          id(listen_freq_hz) = on_315 ? ${mhz_433} * 1e6f : ${mhz_315} * 1e6f;
+          id(cc1101_module).set_frequency(id(listen_freq_hz));
+
+switch:
+  - platform: template
+    name: "Learning Mode"
+    id: learning_mode_switch
+    icon: "mdi:school"
+    lambda: 'return id(learning_mode);'
+    turn_on_action:
+      - lambda: |-
+          id(capture_code).clear();
+          id(learn_first_ms) = 0;
+          id(learning_mode) = true;
+          id(learn_status).publish_state(id(scan_mode)
+              ? "Listening on both bands... hold the remote button ~1 s"
+              : "Listening... hold the remote button ~1 s");
+      - logger.log: "Learning mode ON - press your remote"
+    turn_off_action:
+      - lambda: |-
+          id(learning_mode) = false;
+          id(learn_first_ms) = 0;
+          id(learn_status).publish_state("Learning cancelled");
+      - logger.log: "Learning mode OFF"
+
+button:
+  - platform: restart
+    name: "Restart"
+
+  - platform: template
+    name: "Learn Signal"
+    icon: "mdi:record-rec"
+    on_press:
+      - switch.turn_on: learning_mode_switch
+
+  # Replays go out on the band the signal was learned on
+  - platform: template
+    name: "Replay Learned Signal"
+    icon: "mdi:replay"
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(signal_learned);'
+          then:
+            - lambda: 'id(learn_status).publish_state("Transmitting...");'
+            - script.execute:
+                id: rf_send
+                freq_mhz: !lambda 'return id(learned_freq_hz) / 1e6f;'
+                times: 1
+                wait_ms: 0
+                code: !lambda 'return id(learned_code);'
+          else:
+            - text_sensor.template.publish:
+                id: learn_status
+                state: "No signal to replay - learn one first!"
+
+  - platform: template
+    name: "Replay x3"
+    icon: "mdi:replay"
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(signal_learned);'
+          then:
+            - lambda: 'id(learn_status).publish_state("Transmitting x3...");'
+            - script.execute:
+                id: rf_send
+                freq_mhz: !lambda 'return id(learned_freq_hz) / 1e6f;'
+                times: 3
+                wait_ms: 50
+                code: !lambda 'return id(learned_code);'
+          else:
+            - text_sensor.template.publish:
+                id: learn_status
+                state: "No signal to replay - learn one first!"
+
+  - platform: template
+    name: "Clear Learned Signal"
+    icon: "mdi:delete"
+    on_press:
+      - lambda: |-
+          id(learned_code).clear();
+          id(learned_freq_hz) = 0;
+          id(signal_learned) = false;
+          id(learned_info).publish_state("(empty)");
+          id(learn_status).publish_state("Signal cleared");
+          ESP_LOGI("learn", "Learned signal cleared");
+
+  # Sends on whatever band the receiver is currently on
+  - platform: template
+    name: "TX Test"
+    icon: "mdi:access-point"
+    on_press:
+      - script.execute:
+          id: rf_send
+          freq_mhz: !lambda 'return id(listen_freq_hz) / 1e6f;'
+          times: 1
+          wait_ms: 0
+          code: [500, -500, 500, -500, 500, -500, 500, -500, 500, -500]
+
+  # =========================================================================
+  # EXAMPLE DEVICE BUTTONS
+  #
+  # The codes below are made up. Replace them with codes captured from your
+  # own remotes: press "Learn Signal", press the remote, and copy the "code:"
+  # line from the log. Keep one button per remote button.
+  #
+  #   freq_mhz  ${mhz_433} or ${mhz_315}
+  #   times     how many times to repeat the frame (match your remote)
+  #   wait_ms   silence between repeats (match your remote - see README, this
+  #             is the setting most likely to stop a device responding)
+  # =========================================================================
+
+  # ---------- 433.92 MHz examples ----------
+  - platform: template
+    name: "Example Blind Up"
+    icon: "mdi:blinds-open"
+    on_press:
+      - script.execute:
+          id: rf_send
+          freq_mhz: ${mhz_433}
+          times: 10
+          wait_ms: 0
+          code: [400, -800, 800, -400, 400, -800, 800, -400, 800, -400, 400, -800, 400, -8000]
+
+  - platform: template
+    name: "Example Blind Down"
+    icon: "mdi:blinds"
+    on_press:
+      - script.execute:
+          id: rf_send
+          freq_mhz: ${mhz_433}
+          times: 10
+          wait_ms: 0
+          code: [400, -800, 800, -400, 400, -800, 400, -800, 800, -400, 800, -400, 400, -8000]
+
+  # ---------- 315 MHz examples ----------
+  # Many ceiling-fan remotes repeat each frame ~12 times with only ~10 ms
+  # between repeats, and ignore anything sent with a longer gap.
+  - platform: template
+    name: "Example Fan Light"
+    icon: "mdi:ceiling-fan-light"
+    on_press:
+      - script.execute:
+          id: rf_send
+          freq_mhz: ${mhz_315}
+          times: 12
+          wait_ms: 10
+          code: [450, -900, 900, -450, 450, -900, 450, -900, 900, -450, 450, -900, 400, -9000]
+
+
+fan:
+  - platform: template
+    name: "Example Ceiling Fan"
+    id: ceiling_fan
+    icon: "mdi:ceiling-fan"
+    speed_count: 3
+    preset_modes:
+      - "Low"
+      - "Medium"
+      - "High"
+    restore_mode: ALWAYS_OFF    # never transmit on boot
+    on_preset_set:
+      then:
+        # Preset chosen -> move the speed slider to match.
+        - fan.turn_on:
+            id: ceiling_fan
+            speed: !lambda |-
+              if (x == "Low") return 1;
+              if (x == "High") return 3;
+              return 2;
+    on_speed_set:
+      then:
+        # Speed slider moved -> relabel the preset to match. Each trigger only
+        # fires on a real change, so these two do not loop.
+        - lambda: |-
+            const char *preset = (x <= 1) ? "Low" : (x >= 3 ? "High" : "Medium");
+            if (id(ceiling_fan).get_preset_mode() != preset) {
+              id(ceiling_fan).turn_on().set_preset_mode(preset).perform();
+            }
+    on_state:
+      then:
+        - lambda: |-
+            int want = 0;                       // 0 = off
+            if (id(ceiling_fan).state) {
+              want = id(ceiling_fan).speed;
+              if (want < 1) want = 2;           // turned on without a speed: medium
+              if (want > 3) want = 3;
+            }
+            if (want == id(fan_last_sent)) {     // already in that state: send nothing
+              id(fan_pending) = -1;
+              return;
+            }
+            id(fan_last_sent) = want;
+            id(fan_pending) = want;
+
+        - if:
+            condition:
+              lambda: 'return id(fan_pending) == 0;'
+            then:
+              - script.execute:
+                  id: rf_send
+                  freq_mhz: ${mhz_315}
+                  times: 12
+                  wait_ms: 10
+                  code: [450, -900, 900, -450, 450, -900, 900, -450, 450, -900, 450, -900, 400, -9000]
+
+        - if:
+            condition:
+              lambda: 'return id(fan_pending) == 1;'
+            then:
+              - script.execute:
+                  id: rf_send
+                  freq_mhz: ${mhz_315}
+                  times: 12
+                  wait_ms: 10
+                  code: [450, -900, 900, -450, 450, -900, 900, -450, 450, -900, 900, -450, 400, -9000]
+
+        - if:
+            condition:
+              lambda: 'return id(fan_pending) == 2;'
+            then:
+              - script.execute:
+                  id: rf_send
+                  freq_mhz: ${mhz_315}
+                  times: 12
+                  wait_ms: 10
+                  code: [450, -900, 900, -450, 450, -900, 900, -450, 900, -450, 450, -900, 400, -9000]
+
+        - if:
+            condition:
+              lambda: 'return id(fan_pending) == 3;'
+            then:
+              - script.execute:
+                  id: rf_send
+                  freq_mhz: ${mhz_315}
+                  times: 12
+                  wait_ms: 10
+                  code: [450, -900, 900, -450, 450, -900, 900, -450, 900, -450, 900, -450, 400, -9000]
+
+text_sensor:
+  - platform: template
+    name: "Last Received Signal"
+    id: last_signal
+    icon: "mdi:signal"
+
+  - platform: template
+    name: "Learn Status"
+    id: learn_status
+    icon: "mdi:information"
+
+  - platform: template
+    name: "Learned Signal"
+    id: learned_info
+    icon: "mdi:content-save"
+
+sensor:
+  - platform: template
+    name: "Learned Signal Length"
+    id: signal_length
+    icon: "mdi:counter"
+    unit_of_measurement: "pulses"
+    lambda: 'return id(learned_code).size();'
+    update_interval: 5s
+
+binary_sensor:
+  - platform: template
+    name: "Signal Learned"
+    icon: "mdi:check-circle"
+    lambda: 'return id(signal_learned);'
